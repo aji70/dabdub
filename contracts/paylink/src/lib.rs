@@ -19,10 +19,11 @@ pub enum DataKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PayLinkData {
     pub creator_username: String,
+    /// USDC amount in stroops (1 USDC = 10_000_000 stroops, 7 decimal places).
     pub amount: i128,
     pub note: String,
     pub expiration_ledger: u32,
-    /// Reserved for single-payment enforcement when claiming or settling a PayLink.
+    /// Enforces single-payment: set to true once the PayLink is claimed/settled.
     pub paid: bool,
     pub cancelled: bool,
 }
@@ -38,6 +39,8 @@ pub enum Error {
     PayLinkNotFound = 5,
     NotPayLinkCreator = 6,
     PayLinkAlreadyPaid = 7,
+    Unauthorized = 8,
+    UserNotFound = 9,
 }
 
 #[contract]
@@ -222,6 +225,32 @@ mod test {
     }
 
     #[test]
+    fn paylink_data_xdr_round_trip() {
+        let env = Env::default();
+        let contract_id = env.register(PayLinkContract, ());
+        // token_id is a unique slug, max 64 chars
+        let token_id = String::from_str(&env, "tok-xdr-roundtrip");
+        let data = PayLinkData {
+            creator_username: String::from_str(&env, "alice"),
+            amount: 10_000_000_i128, // 1 USDC in stroops
+            note: String::from_str(&env, "test note"),
+            expiration_ledger: 500,
+            paid: false,
+            cancelled: false,
+        };
+
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&DataKey::PayLink(token_id.clone()), &data);
+            let retrieved: PayLinkData = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PayLink(token_id))
+                .expect("round-trip failed: key not found");
+            assert_eq!(retrieved, data);
+        });
+    }
+
+    #[test]
     fn duplicate_token_id_returns_paylink_already_exists() {
         let env = Env::default();
         let contract_id = env.register_contract(None, PayLinkContract);
@@ -236,7 +265,7 @@ mod test {
         client.create_paylink(&creator, &token_id, &1_i128, &note, &10);
         assert_eq!(
             client.try_create_paylink(&creator, &token_id, &2_i128, &note, &10),
-            Ok(Err(Error::PayLinkAlreadyExists))
+            Err(Ok(Error::PayLinkAlreadyExists))
         );
     }
 
@@ -254,7 +283,7 @@ mod test {
 
         assert_eq!(
             client.try_create_paylink(&creator, &token_id, &0_i128, &note, &10),
-            Ok(Err(Error::InvalidAmount))
+            Err(Ok(Error::InvalidAmount))
         );
     }
 
@@ -299,7 +328,7 @@ mod test {
 
         assert_eq!(
             client.try_cancel_paylink(&other_user, &token_id),
-            Ok(Err(Error::NotPayLinkCreator))
+            Err(Ok(Error::NotPayLinkCreator))
         );
     }
 
@@ -318,15 +347,19 @@ mod test {
         client.register_creator(&creator);
         client.create_paylink(&creator, &token_id, &75_i128, &note, &20);
 
-        let mut stored = client.get_paylink(&token_id).expect("expected PayLink in storage");
-        stored.paid = true;
-        env.storage()
-            .persistent()
-            .set(&DataKey::PayLink(token_id.clone()), &stored);
+        env.as_contract(&contract_id, || {
+            let mut stored = env
+                .storage()
+                .persistent()
+                .get::<_, PayLinkData>(&DataKey::PayLink(token_id.clone()))
+                .expect("expected PayLink in storage");
+            stored.paid = true;
+            env.storage().persistent().set(&DataKey::PayLink(token_id.clone()), &stored);
+        });
 
         assert_eq!(
             client.try_cancel_paylink(&creator, &token_id),
-            Ok(Err(Error::PayLinkAlreadyPaid))
+            Err(Ok(Error::PayLinkAlreadyPaid))
         );
     }
 }
