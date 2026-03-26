@@ -49,3 +49,16 @@ pub fn get_persistent<V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
 ) -> Option<V> {
     env.storage().persistent().get(key)
 }
+
+/// Write a persistent-storage value and bump its TTL.
+pub fn set_persistent<V: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
+    env: &Env,
+    key: &DataKey,
+    val: &V,
+) {
+    const LEDGERS_TO_LIVE: u32 = 535_000; // ~1 year
+    env.storage().persistent().set(key, val);
+    env.storage()
+        .persistent()
+        .extend_ttl(key, LEDGERS_TO_LIVE, LEDGERS_TO_LIVE);
+}
