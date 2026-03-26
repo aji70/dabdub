@@ -2,8 +2,12 @@
 
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String};
 
-const BALANCE_BUMP_THRESHOLD: u32 = 100;
-const BALANCE_BUMP_AMOUNT: u32 = 1000;
+const BALANCE_TTL_THRESHOLD: u32 = 518_400;
+const BALANCE_TTL_EXTEND_TO: u32 = 1_036_800;
+#[allow(dead_code)]
+const PAYLINK_TTL_THRESHOLD: u32 = 103_680;
+#[allow(dead_code)]
+const PAYLINK_TTL_EXTEND_TO: u32 = 207_360;
 
 #[contracttype]
 #[derive(Clone)]
@@ -12,6 +16,7 @@ pub enum DataKey {
     AddrToUsername(Address),
     Balance(String),
     StakeBalance(String),
+    PayLink(String),
 }
 
 #[contracterror]
@@ -27,49 +32,114 @@ pub struct UserLookupContract;
 #[contractimpl]
 impl UserLookupContract {
     pub fn get_address(env: Env, username: String) -> Result<Address, ContractError> {
-        let key = DataKey::UsernameToAddr(username);
-        bump_balance_ttl(&env, &key);
-        env.storage()
+        let key = DataKey::UsernameToAddr(username.clone());
+        let address: Address = env
+            .storage()
             .persistent()
             .get(&key)
-            .ok_or(ContractError::UserNotFound)
+            .ok_or(ContractError::UserNotFound)?;
+
+        bump_user_mapping_ttl(&env, &username, &address);
+
+        Ok(address)
     }
 
     pub fn get_username(env: Env, address: Address) -> Result<String, ContractError> {
-        let key = DataKey::AddrToUsername(address);
-        bump_balance_ttl(&env, &key);
-        env.storage()
+        let key = DataKey::AddrToUsername(address.clone());
+        let username: String = env
+            .storage()
             .persistent()
             .get(&key)
-            .ok_or(ContractError::UserNotFound)
+            .ok_or(ContractError::UserNotFound)?;
+
+        bump_user_mapping_ttl(&env, &username, &address);
+
+        Ok(username)
     }
 
     pub fn get_balance(env: Env, username: String) -> Result<i128, ContractError> {
-        let key = DataKey::Balance(username);
-        bump_balance_ttl(&env, &key);
-        Ok(env.storage().persistent().get(&key).unwrap_or(0))
+        let key = DataKey::Balance(username.clone());
+        let balance = env.storage().persistent().get(&key).unwrap_or(0);
+
+        bump_balance_ttl(&env, &username);
+
+        Ok(balance)
     }
 
     pub fn get_stake_balance(env: Env, username: String) -> Result<i128, ContractError> {
-        let key = DataKey::StakeBalance(username);
-        bump_balance_ttl(&env, &key);
-        Ok(env.storage().persistent().get(&key).unwrap_or(0))
+        let key = DataKey::StakeBalance(username.clone());
+        let stake_balance = env.storage().persistent().get(&key).unwrap_or(0);
+
+        bump_balance_ttl(&env, &username);
+
+        Ok(stake_balance)
     }
 }
 
-fn bump_balance_ttl(env: &Env, key: &DataKey) {
+fn extend_if_present(env: &Env, key: &DataKey, threshold: u32, extend_to: u32) {
     if env.storage().persistent().has(key) {
         env.storage()
             .persistent()
-            .extend_ttl(key, BALANCE_BUMP_THRESHOLD, BALANCE_BUMP_AMOUNT);
+            .extend_ttl(key, threshold, extend_to);
     }
+}
+
+fn bump_balance_ttl(env: &Env, username: &String) {
+    let balance_key = DataKey::Balance(username.clone());
+    let stake_balance_key = DataKey::StakeBalance(username.clone());
+
+    extend_if_present(
+        env,
+        &balance_key,
+        BALANCE_TTL_THRESHOLD,
+        BALANCE_TTL_EXTEND_TO,
+    );
+    extend_if_present(
+        env,
+        &stake_balance_key,
+        BALANCE_TTL_THRESHOLD,
+        BALANCE_TTL_EXTEND_TO,
+    );
+}
+
+#[allow(dead_code)]
+fn bump_paylink_ttl(env: &Env, token_id: &String) {
+    let paylink_key = DataKey::PayLink(token_id.clone());
+    extend_if_present(
+        env,
+        &paylink_key,
+        PAYLINK_TTL_THRESHOLD,
+        PAYLINK_TTL_EXTEND_TO,
+    );
+}
+
+fn bump_user_mapping_ttl(env: &Env, username: &String, address: &Address) {
+    let username_to_addr_key = DataKey::UsernameToAddr(username.clone());
+    let addr_to_username_key = DataKey::AddrToUsername(address.clone());
+
+    extend_if_present(
+        env,
+        &username_to_addr_key,
+        BALANCE_TTL_THRESHOLD,
+        BALANCE_TTL_EXTEND_TO,
+    );
+    extend_if_present(
+        env,
+        &addr_to_username_key,
+        BALANCE_TTL_THRESHOLD,
+        BALANCE_TTL_EXTEND_TO,
+    );
 }
 
 #[cfg(test)]
 mod test {
-    use super::{ContractError, DataKey, UserLookupContract};
+    use super::{
+        bump_paylink_ttl, ContractError, DataKey, UserLookupContract, BALANCE_TTL_EXTEND_TO,
+        BALANCE_TTL_THRESHOLD, PAYLINK_TTL_EXTEND_TO,
+    };
     use soroban_sdk::{
-        testutils::storage::Persistent as _, testutils::Address as _, Address, Env, String,
+        testutils::storage::Persistent as _, testutils::Address as _, testutils::Ledger as _,
+        Address, Env, String,
     };
 
     #[test]
@@ -194,5 +264,79 @@ mod test {
         assert_eq!(existing_result, Ok(existing_value));
         assert_eq!(missing_result, Ok(0));
         assert!(after_ttl >= before_ttl);
+    }
+
+    #[test]
+    fn write_balance_advance_ledger_then_bump_extends_ttl() {
+        let env = Env::default();
+        let contract_id = env.register(UserLookupContract, ());
+
+        let username = String::from_str(&env, "erin");
+        let balance_key = DataKey::Balance(username.clone());
+        let balance_value: i128 = 777;
+
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&balance_key, &balance_value);
+            // Ensure key starts above threshold, then we can age below threshold.
+            env.storage().persistent().extend_ttl(
+                &balance_key,
+                BALANCE_TTL_EXTEND_TO,
+                BALANCE_TTL_EXTEND_TO,
+            );
+            env.storage()
+                .instance()
+                .extend_ttl(BALANCE_TTL_EXTEND_TO, BALANCE_TTL_EXTEND_TO);
+        });
+
+        env.ledger().with_mut(|li| {
+            li.sequence_number = li
+                .sequence_number
+                .saturating_add(BALANCE_TTL_THRESHOLD.saturating_add(1));
+        });
+
+        let ttl_before_bump = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&balance_key)
+        });
+        assert!(ttl_before_bump < BALANCE_TTL_THRESHOLD);
+
+        let result = env.as_contract(&contract_id, || {
+            UserLookupContract::get_balance(env.clone(), username.clone())
+        });
+        let ttl_after_bump = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&balance_key)
+        });
+
+        assert_eq!(result, Ok(balance_value));
+        assert!(ttl_after_bump > ttl_before_bump);
+        assert!(ttl_after_bump >= BALANCE_TTL_EXTEND_TO.saturating_sub(1));
+    }
+
+    #[test]
+    fn bump_paylink_ttl_extends_paylink_key() {
+        let env = Env::default();
+        let contract_id = env.register(UserLookupContract, ());
+
+        let token_id = String::from_str(&env, "pl_001");
+        let paylink_key = DataKey::PayLink(token_id.clone());
+        let payload = String::from_str(&env, "paylink");
+
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&paylink_key, &payload);
+        });
+
+        let before_ttl = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&paylink_key)
+        });
+
+        env.as_contract(&contract_id, || {
+            bump_paylink_ttl(&env, &token_id);
+        });
+
+        let after_ttl = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&paylink_key)
+        });
+
+        assert!(after_ttl >= before_ttl);
+        assert!(after_ttl >= PAYLINK_TTL_EXTEND_TO.saturating_sub(1));
     }
 }
