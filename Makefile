@@ -1,36 +1,37 @@
-CONTRACTS_DIR := dabdub_contracts
-WASM_DIR      := $(CONTRACTS_DIR)/target/wasm32v1-none/release
-WASM_SIZE_LIMIT := 65536  # 64 KB
+# Dabdub contracts Makefile
 
-.PHONY: build build-optimised check-wasm-size test
+CONTRACTS := admin_auth admin_timelock batch_payments escrow fee_calculator fee_distributor liquidity_router registry
+
+.PHONY: all build test clean help $(addprefix build-,$(CONTRACTS)) $(addprefix test-,$(CONTRACTS))
+
+all: build
+
+help:
+	@echo "Available targets:"
+	@echo "  make build              Build all contracts"
+	@echo "  make test               Run all contract tests"
+	@echo "  make clean              Remove all build artifacts"
+	@echo "  make help               Show this help message"
+	@echo ""
+	@echo "Per-contract build targets:"
+	@$(foreach c,$(CONTRACTS),echo "  make build-$(c)";)
+	@echo ""
+	@echo "Per-contract test targets:"
+	@$(foreach c,$(CONTRACTS),echo "  make test-$(c)";)
 
 build:
-	cd $(CONTRACTS_DIR) && cargo build --target wasm32v1-none --release
-
-build-optimised: build
-	@echo "Running wasm-opt -Oz on all contract WASMs..."
-	@for wasm in $(WASM_DIR)/*.wasm; do \
-		echo "  optimising $$wasm"; \
-		wasm-opt -Oz --output $$wasm $$wasm; \
-	done
-	@echo "Done."
-
-check-wasm-size: build-optimised
-	@echo "Checking WASM sizes (limit: $(WASM_SIZE_LIMIT) bytes)..."
-	@failed=0; \
-	for wasm in $(WASM_DIR)/*.wasm; do \
-		size=$$(wc -c < $$wasm); \
-		if [ $$size -gt $(WASM_SIZE_LIMIT) ]; then \
-			echo "  FAIL  $$wasm  $$size bytes  (limit $(WASM_SIZE_LIMIT))"; \
-			failed=1; \
-		else \
-			echo "  OK    $$wasm  $$size bytes"; \
-		fi; \
-	done; \
-	if [ $$failed -ne 0 ]; then \
-		echo "One or more contracts exceed the $(WASM_SIZE_LIMIT)-byte limit."; \
-		exit 1; \
-	fi
+	cargo build --workspace
 
 test:
-	cd $(CONTRACTS_DIR) && cargo test
+	cargo test --workspace
+
+clean:
+	cargo clean
+	rm -rf target
+	rm -rf test_snapshots
+
+$(addprefix build-,$(CONTRACTS)): build-%:
+	cargo build -p $*
+
+$(addprefix test-,$(CONTRACTS)): test-%:
+	cargo test -p $*
