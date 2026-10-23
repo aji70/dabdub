@@ -13,5 +13,22 @@ services:
     volumes:
       - stellar-data:/opt/stellar
 
+  stellar-quickstart:
+    image: stellar/quickstart:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - NETWORK=local
+      - ENABLE_SOROBAN_RPC=true
+    volumes:
+      - stellar-quickstart-data:/opt/stellar
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/soroban/rpc"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
 volumes:
   stellar-data:
+  grafana-data:
+  stellar-quickstart-data:
